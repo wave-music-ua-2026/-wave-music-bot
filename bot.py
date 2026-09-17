@@ -33,12 +33,13 @@ FAVORITES_PER_PAGE = 5
 
 
 # =========================================================
-# ГОЛОВНЕ МЕНЮ
+# КЛАВІАТУРИ
 # =========================================================
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["🔎 Пошук музики", "❤️ Моя музика"],
+        ["📂 Мої плейлисти"],
         ["🚗 В авто", "🏋️ Для спорту"],
         ["😴 Для сну", "🎉 Для вечірки"],
         ["🇺🇦 Українська музика"],
@@ -46,7 +47,6 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
 
 UKRAINIAN_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -58,7 +58,6 @@ UKRAINIAN_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-
 CAR_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["🔥 Хіти в авто", "🌙 Нічна поїздка"],
@@ -67,7 +66,6 @@ CAR_KEYBOARD = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
 
 SPORT_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -78,7 +76,6 @@ SPORT_KEYBOARD = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
-
 PARTY_KEYBOARD = ReplyKeyboardMarkup(
     [
         ["🔥 Party Hits", "💃 Dance"],
@@ -87,7 +84,6 @@ PARTY_KEYBOARD = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
-
 
 SLEEP_KEYBOARD = ReplyKeyboardMarkup(
     [
@@ -106,6 +102,8 @@ SLEEP_KEYBOARD = ReplyKeyboardMarkup(
 def init_database():
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
+
+            # Стару таблицю НЕ видаляємо
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS favorites (
@@ -122,10 +120,46 @@ def init_database():
                 """
             )
 
+            # Плейлисти
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS playlists (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, name)
+                );
+                """
+            )
+
+            # Треки плейлистів
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS playlist_tracks (
+                    id SERIAL PRIMARY KEY,
+                    playlist_id INTEGER NOT NULL
+                        REFERENCES playlists(id)
+                        ON DELETE CASCADE,
+                    video_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    artist TEXT,
+                    duration INTEGER,
+                    thumbnail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(playlist_id, video_id)
+                );
+                """
+            )
+
         conn.commit()
 
     print("PostgreSQL ready")
 
+
+# =========================================================
+# FAVORITES DB
+# =========================================================
 
 def db_add_favorite(user_id, track):
     with psycopg.connect(DATABASE_URL) as conn:
@@ -266,6 +300,223 @@ def db_clear_favorites(user_id):
 
 
 # =========================================================
+# PLAYLISTS DB
+# =========================================================
+
+def db_create_playlist(user_id, name):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO playlists (
+                    user_id,
+                    name
+                )
+                VALUES (%s, %s)
+                ON CONFLICT (user_id, name)
+                DO NOTHING
+                RETURNING id;
+                """,
+                (user_id, name),
+            )
+
+            result = cur.fetchone()
+
+        conn.commit()
+
+    return result is not None
+
+
+def db_get_playlists(user_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    p.id,
+                    p.name,
+                    COUNT(pt.id)
+                FROM playlists p
+                LEFT JOIN playlist_tracks pt
+                    ON pt.playlist_id = p.id
+                WHERE p.user_id = %s
+                GROUP BY p.id, p.name, p.created_at
+                ORDER BY p.created_at DESC;
+                """,
+                (user_id,),
+            )
+
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "name": row[1],
+            "count": row[2],
+        }
+        for row in rows
+    ]
+
+
+def db_get_playlist(user_id, playlist_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, name
+                FROM playlists
+                WHERE id = %s
+                AND user_id = %s;
+                """,
+                (playlist_id, user_id),
+            )
+
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "id": row[0],
+        "name": row[1],
+    }
+
+
+def db_get_playlist_tracks(user_id, playlist_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    pt.video_id,
+                    pt.title,
+                    pt.artist,
+                    pt.duration,
+                    pt.thumbnail
+                FROM playlist_tracks pt
+                JOIN playlists p
+                    ON p.id = pt.playlist_id
+                WHERE pt.playlist_id = %s
+                AND p.user_id = %s
+                ORDER BY pt.created_at DESC;
+                """,
+                (playlist_id, user_id),
+            )
+
+            rows = cur.fetchall()
+
+    return [
+        {
+            "id": row[0],
+            "title": row[1],
+            "artist": row[2],
+            "duration": row[3],
+            "thumbnail": row[4],
+        }
+        for row in rows
+    ]
+
+
+def db_add_track_to_playlist(
+    user_id,
+    playlist_id,
+    track,
+):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+
+            # Перевіряємо, що плейлист належить користувачу
+            cur.execute(
+                """
+                SELECT id
+                FROM playlists
+                WHERE id = %s
+                AND user_id = %s;
+                """,
+                (playlist_id, user_id),
+            )
+
+            if not cur.fetchone():
+                return False
+
+            cur.execute(
+                """
+                INSERT INTO playlist_tracks (
+                    playlist_id,
+                    video_id,
+                    title,
+                    artist,
+                    duration,
+                    thumbnail
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (playlist_id, video_id)
+                DO NOTHING
+                RETURNING id;
+                """,
+                (
+                    playlist_id,
+                    track["id"],
+                    track["title"],
+                    track["artist"],
+                    track.get("duration"),
+                    track.get("thumbnail"),
+                ),
+            )
+
+            result = cur.fetchone()
+
+        conn.commit()
+
+    return result is not None
+
+
+def db_remove_playlist_track(
+    user_id,
+    playlist_id,
+    video_id,
+):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM playlist_tracks
+                WHERE playlist_id = %s
+                AND video_id = %s
+                AND EXISTS (
+                    SELECT 1
+                    FROM playlists
+                    WHERE id = %s
+                    AND user_id = %s
+                );
+                """,
+                (
+                    playlist_id,
+                    video_id,
+                    playlist_id,
+                    user_id,
+                ),
+            )
+
+        conn.commit()
+
+
+def db_delete_playlist(user_id, playlist_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                DELETE FROM playlists
+                WHERE id = %s
+                AND user_id = %s;
+                """,
+                (playlist_id, user_id),
+            )
+
+        conn.commit()
+
+
+# =========================================================
 # ДОПОМІЖНІ ФУНКЦІЇ
 # =========================================================
 
@@ -300,6 +551,17 @@ def clean_text(text, max_length=500):
     return text
 
 
+def clear_modes(context):
+    context.user_data.pop(
+        "favorite_search_mode",
+        None,
+    )
+    context.user_data.pop(
+        "playlist_create_mode",
+        None,
+    )
+
+
 # =========================================================
 # START
 # =========================================================
@@ -308,19 +570,14 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    context.user_data.pop("favorite_search_mode", None)
+    clear_modes(context)
 
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
-        "🔎 Напиши назву пісні або виконавця.\n\n"
-        "Наприклад:\n"
-        "• The Weeknd Blinding Lights\n"
-        "• Океан Ельзи Обійми\n"
-        "• музика в авто\n\n"
-        "❤️ Зберігай улюблені треки "
-        "в розділі «Моя музика».\n\n"
-        "🎧 Також можеш надіслати свій MP3/M4A — "
-        "його можна слухати прямо в Telegram.",
+        "🔎 Шукай музику та виконавців.\n"
+        "❤️ Зберігай улюблені треки.\n"
+        "📂 Створюй власні плейлисти.\n\n"
+        "🎧 Також можеш надіслати свій MP3/M4A.",
         reply_markup=MAIN_KEYBOARD,
     )
 
@@ -329,7 +586,7 @@ async def start(
 # YOUTUBE SEARCH
 # =========================================================
 
-def youtube_search_sync(query, limit=5):
+def youtube_search_sync(search_text, limit=5):
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -341,7 +598,7 @@ def youtube_search_sync(query, limit=5):
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             result = ydl.extract_info(
-                f"ytsearch{limit}:{query}",
+                f"ytsearch{limit}:{search_text}",
                 download=False,
             )
 
@@ -352,10 +609,10 @@ def youtube_search_sync(query, limit=5):
         return []
 
 
-async def youtube_search(query, limit=5):
+async def youtube_search(search_text, limit=5):
     return await asyncio.to_thread(
         youtube_search_sync,
-        query,
+        search_text,
         limit,
     )
 
@@ -369,6 +626,7 @@ async def send_track_card(
     item,
     index=None,
     favorite_mode=False,
+    playlist_id=None,
 ):
     video_id = item.get("id")
 
@@ -438,24 +696,49 @@ async def send_track_card(
         ],
     ]
 
-    if favorite_mode:
+    # Якщо це трек усередині плейлиста
+    if playlist_id is not None:
         buttons.append(
             [
                 InlineKeyboardButton(
-                    "🗑 Видалити",
-                    callback_data=f"remove:{video_id}",
+                    "🗑 Прибрати з плейлиста",
+                    callback_data=(
+                        f"plremove:{playlist_id}:{video_id}"
+                    ),
                 )
             ]
         )
+
     else:
+        # Додати в плейлист можна з результатів
+        # пошуку та з "Моя музика"
         buttons.append(
             [
                 InlineKeyboardButton(
-                    "❤️ Зберегти",
-                    callback_data=f"save:{video_id}",
+                    "➕ До плейлиста",
+                    callback_data=f"plchoose:{video_id}",
                 )
             ]
         )
+
+        if favorite_mode:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "🗑 Видалити з обраного",
+                        callback_data=f"remove:{video_id}",
+                    )
+                ]
+            )
+        else:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "❤️ Зберегти",
+                        callback_data=f"save:{video_id}",
+                    )
+                ]
+            )
 
     keyboard = InlineKeyboardMarkup(buttons)
 
@@ -476,20 +759,20 @@ async def send_track_card(
 
 
 # =========================================================
-# ЗВИЧАЙНИЙ ПОШУК
+# ПОШУК
 # =========================================================
 
 async def send_results(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    search_query,
+    search_text,
 ):
     status = await update.message.reply_text(
-        f"🔎 Шукаю «{search_query}»..."
+        f"🔎 Шукаю «{search_text}»..."
     )
 
     results = await youtube_search(
-        search_query,
+        search_text,
         5,
     )
 
@@ -532,7 +815,7 @@ async def send_results(
 
     await update.message.reply_text(
         f"🎧 Результати для:\n\n"
-        f"🔎 {search_query}\n\n"
+        f"🔎 {search_text}\n\n"
         f"Знайшов {len(tracks)} варіантів 👇"
     )
 
@@ -548,7 +831,7 @@ async def send_results(
 
 
 # =========================================================
-# ❤️ МОЯ МУЗИКА — СТОРІНКИ
+# ❤️ МОЯ МУЗИКА
 # =========================================================
 
 async def send_favorites_page(
@@ -576,7 +859,7 @@ async def send_favorites_page(
         await message.reply_text(
             "❤️ У «Моя музика» поки порожньо.\n\n"
             "Знайди пісню та натисни "
-            "«❤️ Зберегти» під карткою.",
+            "«❤️ Зберегти».",
             reply_markup=MAIN_KEYBOARD,
         )
         return
@@ -607,14 +890,14 @@ async def send_favorites_page(
         page_tracks,
         start=1,
     ):
-        track_number = start_index + offset
-
         await send_track_card(
             message,
             track,
-            index=track_number,
+            index=start_index + offset,
             favorite_mode=True,
         )
+
+    rows = []
 
     navigation = []
 
@@ -634,12 +917,10 @@ async def send_favorites_page(
             )
         )
 
-    keyboard_rows = []
-
     if navigation:
-        keyboard_rows.append(navigation)
+        rows.append(navigation)
 
-    keyboard_rows.append(
+    rows.append(
         [
             InlineKeyboardButton(
                 "🔀 Випадковий трек",
@@ -648,7 +929,7 @@ async def send_favorites_page(
         ]
     )
 
-    keyboard_rows.append(
+    rows.append(
         [
             InlineKeyboardButton(
                 "🔍 Пошук у моїй музиці",
@@ -657,7 +938,16 @@ async def send_favorites_page(
         ]
     )
 
-    keyboard_rows.append(
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "📂 Мої плейлисти",
+                callback_data="playlists",
+            )
+        ]
+    )
+
+    rows.append(
         [
             InlineKeyboardButton(
                 "🗑 Очистити обране",
@@ -668,9 +958,7 @@ async def send_favorites_page(
 
     await message.reply_text(
         "🎧 Керування «Моя музика»",
-        reply_markup=InlineKeyboardMarkup(
-            keyboard_rows
-        ),
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
@@ -678,10 +966,7 @@ async def show_favorites(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    context.user_data.pop(
-        "favorite_search_mode",
-        None,
-    )
+    clear_modes(context)
 
     await send_favorites_page(
         update.message,
@@ -689,10 +974,6 @@ async def show_favorites(
         page=0,
     )
 
-
-# =========================================================
-# 🔍 ПОШУК У МОЇЙ МУЗИЦІ
-# =========================================================
 
 async def search_my_music(
     update: Update,
@@ -725,8 +1006,7 @@ async def search_my_music(
         return
 
     await update.message.reply_text(
-        f"🔍 Знайдено в «Моя музика»: "
-        f"{len(results)} 👇"
+        f"🔍 Знайдено: {len(results)} 👇"
     )
 
     for index, track in enumerate(
@@ -740,14 +1020,153 @@ async def search_my_music(
             favorite_mode=True,
         )
 
-    await update.message.reply_text(
-        "❤️ Пошук завершено.",
-        reply_markup=MAIN_KEYBOARD,
+
+# =========================================================
+# 📂 ПЛЕЙЛИСТИ
+# =========================================================
+
+async def send_playlists(message, user_id):
+    try:
+        playlists = await asyncio.to_thread(
+            db_get_playlists,
+            user_id,
+        )
+
+    except Exception as error:
+        print("Playlists error:", error)
+
+        await message.reply_text(
+            "😕 Не вдалося відкрити плейлисти."
+        )
+        return
+
+    rows = []
+
+    for playlist in playlists:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    (
+                        f"🎵 {playlist['name']} "
+                        f"({playlist['count']})"
+                    ),
+                    callback_data=(
+                        f"plopen:{playlist['id']}"
+                    ),
+                )
+            ]
+        )
+
+    rows.append(
+        [
+            InlineKeyboardButton(
+                "➕ Створити плейлист",
+                callback_data="plcreate",
+            )
+        ]
+    )
+
+    if playlists:
+        text = (
+            "📂 Мої плейлисти\n\n"
+            "Обери плейлист 👇"
+        )
+    else:
+        text = (
+            "📂 Мої плейлисти\n\n"
+            "Плейлистів поки немає.\n"
+            "Створи перший 👇"
+        )
+
+    await message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
+async def send_playlist(
+    message,
+    user_id,
+    playlist_id,
+):
+    playlist = await asyncio.to_thread(
+        db_get_playlist,
+        user_id,
+        playlist_id,
+    )
+
+    if not playlist:
+        await message.reply_text(
+            "😕 Плейлист не знайдено."
+        )
+        return
+
+    tracks = await asyncio.to_thread(
+        db_get_playlist_tracks,
+        user_id,
+        playlist_id,
+    )
+
+    await message.reply_text(
+        f"📂 {playlist['name']}\n\n"
+        f"🎵 Треків: {len(tracks)}"
+    )
+
+    if tracks:
+        for index, track in enumerate(
+            tracks,
+            start=1,
+        ):
+            await send_track_card(
+                message,
+                track,
+                index=index,
+                playlist_id=playlist_id,
+            )
+    else:
+        await message.reply_text(
+            "Тут поки немає треків 🎵"
+        )
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "⬅️ До плейлистів",
+                    callback_data="playlists",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🗑 Видалити плейлист",
+                    callback_data=(
+                        f"pldelete:{playlist_id}"
+                    ),
+                )
+            ],
+        ]
+    )
+
+    await message.reply_text(
+        "⚙️ Керування плейлистом",
+        reply_markup=keyboard,
+    )
+
+
+def get_track_for_playlist(
+    context,
+    video_id,
+):
+    tracks = context.user_data.get(
+        "search_tracks",
+        {},
+    )
+
+    return tracks.get(video_id)
+
+
 # =========================================================
-# CALLBACK КНОПКИ
+# CALLBACK
 # =========================================================
 
 async def button_callback(
@@ -758,17 +1177,15 @@ async def button_callback(
     data = query.data
     user_id = query.from_user.id
 
-    # ❤️ ЗБЕРЕГТИ
+    # ❤️ SAVE
 
     if data.startswith("save:"):
         video_id = data.split(":", 1)[1]
 
-        tracks = context.user_data.get(
-            "search_tracks",
-            {},
+        track = get_track_for_playlist(
+            context,
+            video_id,
         )
-
-        track = tracks.get(video_id)
 
         if not track:
             await query.answer(
@@ -784,29 +1201,28 @@ async def button_callback(
                 track,
             )
 
+            if added:
+                await query.answer(
+                    "❤️ Додано в «Моя музика»",
+                    show_alert=True,
+                )
+            else:
+                await query.answer(
+                    "Цей трек уже збережений ❤️",
+                    show_alert=True,
+                )
+
         except Exception as error:
-            print("Database save error:", error)
+            print("Save error:", error)
 
             await query.answer(
                 "Помилка збереження 😕",
                 show_alert=True,
             )
-            return
-
-        if added:
-            await query.answer(
-                "❤️ Додано в «Моя музика»",
-                show_alert=True,
-            )
-        else:
-            await query.answer(
-                "Цей трек уже збережений ❤️",
-                show_alert=True,
-            )
 
         return
 
-    # 🗑 ВИДАЛИТИ
+    # 🗑 FAVORITE
 
     if data.startswith("remove:"):
         video_id = data.split(":", 1)[1]
@@ -818,9 +1234,7 @@ async def button_callback(
                 video_id,
             )
 
-            await query.answer(
-                "🗑 Видалено"
-            )
+            await query.answer("🗑 Видалено")
 
             try:
                 await query.message.delete()
@@ -828,7 +1242,7 @@ async def button_callback(
                 pass
 
         except Exception as error:
-            print("Database remove error:", error)
+            print("Remove error:", error)
 
             await query.answer(
                 "Не вдалося видалити 😕",
@@ -837,52 +1251,45 @@ async def button_callback(
 
         return
 
-    # 📄 СТОРІНКА
+    # FAVORITE PAGE
 
     if data.startswith("favpage:"):
-        try:
-            page = int(
-                data.split(":", 1)[1]
-            )
-        except ValueError:
-            page = 0
+        page = int(
+            data.split(":", 1)[1]
+        )
 
         await query.answer()
 
         await send_favorites_page(
             query.message,
             user_id,
-            page=page,
+            page,
         )
-
         return
 
-    # 🔀 ВИПАДКОВИЙ ТРЕК
+    # RANDOM
 
     if data == "random_favorite":
         await query.answer()
 
-        try:
-            favorites = await asyncio.to_thread(
-                db_get_favorites,
-                user_id,
-            )
-
-        except Exception as error:
-            print("Random favorite error:", error)
-
-            await query.message.reply_text(
-                "😕 Не вдалося вибрати трек."
-            )
-            return
+        favorites = await asyncio.to_thread(
+            db_get_favorites,
+            user_id,
+        )
 
         if not favorites:
             await query.message.reply_text(
-                "❤️ У «Моя музика» поки порожньо."
+                "❤️ У «Моя музика» порожньо."
             )
             return
 
         track = random.choice(favorites)
+
+        # Зберігаємо для кнопки "До плейлиста"
+        context.user_data.setdefault(
+            "search_tracks",
+            {},
+        )[track["id"]] = track
 
         await query.message.reply_text(
             "🔀 Твій випадковий трек 👇"
@@ -893,26 +1300,26 @@ async def button_callback(
             track,
             favorite_mode=True,
         )
-
         return
 
-    # 🔍 ПОШУК В ОБРАНОМУ
+    # SEARCH FAVORITES
 
     if data == "search_favorites":
         await query.answer()
+
+        clear_modes(context)
 
         context.user_data[
             "favorite_search_mode"
         ] = True
 
         await query.message.reply_text(
-            "🔍 Пошук у «Моя музика»\n\n"
-            "Напиши назву треку або виконавця 👇"
+            "🔍 Напиши назву треку "
+            "або виконавця 👇"
         )
-
         return
 
-    # 🗑 ОЧИСТИТИ ВСЕ
+    # CLEAR FAVORITES
 
     if data == "clear_favorites":
         try:
@@ -932,10 +1339,251 @@ async def button_callback(
             )
 
         except Exception as error:
-            print("Database clear error:", error)
+            print("Clear error:", error)
 
             await query.answer(
                 "Помилка бази даних 😕",
+                show_alert=True,
+            )
+
+        return
+
+    # =====================================================
+    # 📂 PLAYLISTS
+    # =====================================================
+
+    if data == "playlists":
+        await query.answer()
+
+        await send_playlists(
+            query.message,
+            user_id,
+        )
+        return
+
+    # CREATE
+
+    if data == "plcreate":
+        await query.answer()
+
+        clear_modes(context)
+
+        context.user_data[
+            "playlist_create_mode"
+        ] = True
+
+        await query.message.reply_text(
+            "➕ Новий плейлист\n\n"
+            "Напиши назву плейлиста 👇\n\n"
+            "Наприклад: В авто"
+        )
+        return
+
+    # OPEN
+
+    if data.startswith("plopen:"):
+        playlist_id = int(
+            data.split(":", 1)[1]
+        )
+
+        await query.answer()
+
+        await send_playlist(
+            query.message,
+            user_id,
+            playlist_id,
+        )
+        return
+
+    # CHOOSE PLAYLIST FOR TRACK
+
+    if data.startswith("plchoose:"):
+        video_id = data.split(":", 1)[1]
+
+        track = get_track_for_playlist(
+            context,
+            video_id,
+        )
+
+        # Якщо картка з "Моя музика",
+        # шукаємо трек у базі favorites
+        if not track:
+            favorites = await asyncio.to_thread(
+                db_get_favorites,
+                user_id,
+            )
+
+            for favorite in favorites:
+                if favorite["id"] == video_id:
+                    track = favorite
+                    break
+
+        if not track:
+            await query.answer(
+                "Відкрий трек ще раз 🎵",
+                show_alert=True,
+            )
+            return
+
+        context.user_data[
+            "playlist_track"
+        ] = track
+
+        playlists = await asyncio.to_thread(
+            db_get_playlists,
+            user_id,
+        )
+
+        await query.answer()
+
+        if not playlists:
+            await query.message.reply_text(
+                "📂 У тебе ще немає плейлистів.\n\n"
+                "Спочатку створи плейлист.",
+                reply_markup=InlineKeyboardMarkup(
+                    [
+                        [
+                            InlineKeyboardButton(
+                                "➕ Створити плейлист",
+                                callback_data="plcreate",
+                            )
+                        ]
+                    ]
+                ),
+            )
+            return
+
+        rows = []
+
+        for playlist in playlists:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"📂 {playlist['name']}",
+                        callback_data=(
+                            f"pladd:{playlist['id']}"
+                        ),
+                    )
+                ]
+            )
+
+        await query.message.reply_text(
+            "➕ В який плейлист додати трек?",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return
+
+    # ADD TRACK
+
+    if data.startswith("pladd:"):
+        playlist_id = int(
+            data.split(":", 1)[1]
+        )
+
+        track = context.user_data.get(
+            "playlist_track"
+        )
+
+        if not track:
+            await query.answer(
+                "Вибери трек ще раз 🎵",
+                show_alert=True,
+            )
+            return
+
+        try:
+            added = await asyncio.to_thread(
+                db_add_track_to_playlist,
+                user_id,
+                playlist_id,
+                track,
+            )
+
+            if added:
+                await query.answer(
+                    "🎵 Додано до плейлиста",
+                    show_alert=True,
+                )
+            else:
+                await query.answer(
+                    "Трек уже є в цьому плейлисті",
+                    show_alert=True,
+                )
+
+        except Exception as error:
+            print("Playlist add error:", error)
+
+            await query.answer(
+                "Не вдалося додати 😕",
+                show_alert=True,
+            )
+
+        return
+
+    # REMOVE TRACK FROM PLAYLIST
+
+    if data.startswith("plremove:"):
+        parts = data.split(":", 2)
+
+        playlist_id = int(parts[1])
+        video_id = parts[2]
+
+        try:
+            await asyncio.to_thread(
+                db_remove_playlist_track,
+                user_id,
+                playlist_id,
+                video_id,
+            )
+
+            await query.answer(
+                "🗑 Прибрано з плейлиста"
+            )
+
+            try:
+                await query.message.delete()
+            except Exception:
+                pass
+
+        except Exception as error:
+            print("Playlist remove error:", error)
+
+            await query.answer(
+                "Помилка видалення 😕",
+                show_alert=True,
+            )
+
+        return
+
+    # DELETE PLAYLIST
+
+    if data.startswith("pldelete:"):
+        playlist_id = int(
+            data.split(":", 1)[1]
+        )
+
+        try:
+            await asyncio.to_thread(
+                db_delete_playlist,
+                user_id,
+                playlist_id,
+            )
+
+            await query.answer(
+                "🗑 Плейлист видалено",
+                show_alert=True,
+            )
+
+            await query.message.reply_text(
+                "📂 Плейлист видалено.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+
+        except Exception as error:
+            print("Playlist delete error:", error)
+
+            await query.answer(
+                "Не вдалося видалити 😕",
                 show_alert=True,
             )
 
@@ -968,9 +1616,7 @@ async def handle_audio(
         if performer:
             text += f"\n👤 {performer}"
 
-        text += (
-            "\n\n🎧 Слухай прямо в Telegram ▶️"
-        )
+        text += "\n\n🎧 Слухай прямо в Telegram ▶️"
 
         await update.message.reply_text(text)
         return
@@ -997,14 +1643,12 @@ async def handle_audio(
 
             await update.message.reply_audio(
                 audio=file.file_id,
-                caption=(
-                    "🎧 Слухай прямо в Telegram ▶️"
-                ),
+                caption="🎧 Слухай прямо в Telegram ▶️",
             )
 
 
 # =========================================================
-# ТЕКСТОВЕ МЕНЮ
+# TEXT
 # =========================================================
 
 async def handle_text(
@@ -1012,9 +1656,59 @@ async def handle_text(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     text = update.message.text.strip()
+    user_id = update.effective_user.id
 
-    # 🔍 ПОШУК У МОЇЙ МУЗИЦІ
+    # Створення плейлиста
+    if context.user_data.get(
+        "playlist_create_mode"
+    ):
+        context.user_data[
+            "playlist_create_mode"
+        ] = False
 
+        name = text.strip()
+
+        if len(name) < 1:
+            await update.message.reply_text(
+                "Напиши назву плейлиста."
+            )
+            return
+
+        if len(name) > 50:
+            await update.message.reply_text(
+                "Назва занадто довга.\n"
+                "Максимум 50 символів."
+            )
+            return
+
+        try:
+            created = await asyncio.to_thread(
+                db_create_playlist,
+                user_id,
+                name,
+            )
+
+            if created:
+                await update.message.reply_text(
+                    f"✅ Плейлист «{name}» створено!",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+            else:
+                await update.message.reply_text(
+                    f"📂 Плейлист «{name}» вже існує.",
+                    reply_markup=MAIN_KEYBOARD,
+                )
+
+        except Exception as error:
+            print("Create playlist error:", error)
+
+            await update.message.reply_text(
+                "😕 Не вдалося створити плейлист."
+            )
+
+        return
+
+    # Пошук у favorites
     if context.user_data.get(
         "favorite_search_mode"
     ):
@@ -1029,24 +1723,18 @@ async def handle_text(
         )
         return
 
-    # ГОЛОВНЕ МЕНЮ
-
+    # MAIN
     if text in (
         "🏠 Головне меню",
         "⬅️ Назад",
     ):
-        context.user_data.pop(
-            "favorite_search_mode",
-            None,
-        )
+        clear_modes(context)
 
         await update.message.reply_text(
             "🎵 WAVE | Головне меню",
             reply_markup=MAIN_KEYBOARD,
         )
         return
-
-    # ❤️ МОЯ МУЗИКА
 
     if text == "❤️ Моя музика":
         await show_favorites(
@@ -1055,7 +1743,14 @@ async def handle_text(
         )
         return
 
-    # 🔎 ПОШУК
+    if text == "📂 Мої плейлисти":
+        clear_modes(context)
+
+        await send_playlists(
+            update.message,
+            user_id,
+        )
+        return
 
     if text == "🔎 Пошук музики":
         await update.message.reply_text(
@@ -1063,8 +1758,6 @@ async def handle_text(
             reply_markup=MAIN_KEYBOARD,
         )
         return
-
-    # TELEGRAM AUDIO
 
     if text == "🎧 Як слухати в Telegram":
         await update.message.reply_text(
@@ -1075,8 +1768,6 @@ async def handle_text(
         )
         return
 
-    # 🇺🇦 УКРАЇНСЬКА МУЗИКА
-
     if text == "🇺🇦 Українська музика":
         await update.message.reply_text(
             "🇺🇦 Українська музика\n\n"
@@ -1084,8 +1775,6 @@ async def handle_text(
             reply_markup=UKRAINIAN_KEYBOARD,
         )
         return
-
-    # 🚗 АВТО
 
     if text == "🚗 В авто":
         await update.message.reply_text(
@@ -1095,8 +1784,6 @@ async def handle_text(
         )
         return
 
-    # 🏋️ СПОРТ
-
     if text == "🏋️ Для спорту":
         await update.message.reply_text(
             "🏋️ Музика для спорту\n\n"
@@ -1105,8 +1792,6 @@ async def handle_text(
         )
         return
 
-    # 🎉 ВЕЧІРКА
-
     if text == "🎉 Для вечірки":
         await update.message.reply_text(
             "🎉 Музика для вечірки\n\n"
@@ -1114,8 +1799,6 @@ async def handle_text(
             reply_markup=PARTY_KEYBOARD,
         )
         return
-
-    # 😴 СОН
 
     if text == "😴 Для сну":
         await update.message.reply_text(
@@ -1197,8 +1880,6 @@ async def handle_text(
             categories[text],
         )
         return
-
-    # ЗВИЧАЙНИЙ ПОШУК
 
     await send_results(
         update,
