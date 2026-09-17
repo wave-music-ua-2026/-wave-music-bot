@@ -2,7 +2,13 @@ import os
 from urllib.parse import quote_plus
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 TOKEN = os.environ["BOT_TOKEN"]
 
@@ -23,19 +29,51 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_music(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
 
-    youtube = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
-    spotify = f"https://open.spotify.com/search/{quote_plus(query)}"
-    soundcloud = f"https://soundcloud.com/search?q={quote_plus(query)}"
+    if not query:
+        return
+
+    encoded_query = quote_plus(query)
+
+    youtube = (
+        f"https://www.youtube.com/results?"
+        f"search_query={encoded_query}"
+    )
+
+    spotify = (
+        f"https://open.spotify.com/search/"
+        f"{encoded_query}"
+    )
+
+    soundcloud = (
+        f"https://soundcloud.com/search?"
+        f"q={encoded_query}"
+    )
 
     keyboard = [
-        [InlineKeyboardButton("▶️ YouTube", url=youtube)],
-        [InlineKeyboardButton("🟢 Spotify", url=spotify)],
-        [InlineKeyboardButton("☁️ SoundCloud", url=soundcloud)],
+        [
+            InlineKeyboardButton(
+                "▶️ YouTube",
+                url=youtube
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🟢 Spotify",
+                url=spotify
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "☁️ SoundCloud",
+                url=soundcloud
+            )
+        ],
     ]
 
     await update.message.reply_text(
-        f"🎧 Знайшов варіанти для:\n\n🔎 {query}\n\n"
-        "Обери, де шукати музику 👇",
+        f"🎧 Знайшов варіанти для:\n\n"
+        f"🔎 {query}\n\n"
+        f"Обери, де шукати музику 👇",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -44,7 +82,12 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_music))
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            search_music
+        )
+    )
 
     print("WAVE bot started")
     app.run_polling()
