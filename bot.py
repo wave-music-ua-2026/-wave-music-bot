@@ -22,14 +22,17 @@ from telegram.ext import (
 TOKEN = os.environ["BOT_TOKEN"]
 
 
-# =========================
+# =========================================================
 # ГОЛОВНЕ МЕНЮ
-# =========================
+# =========================================================
 
 def main_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["🔎 Пошук музики"],
+            ["🚗 В авто", "🏋️ Для спорту"],
+            ["😴 Для сну", "🎉 Для вечірки"],
+            ["🇺🇦 Українська музика"],
             ["🎧 Як слухати в Telegram"],
         ],
         resize_keyboard=True,
@@ -37,9 +40,9 @@ def main_keyboard():
     )
 
 
-# =========================
+# =========================================================
 # START
-# =========================
+# =========================================================
 
 async def start(
     update: Update,
@@ -47,52 +50,55 @@ async def start(
 ):
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
-        "🔎 Напиши назву пісні або виконавця.\n\n"
-        "Наприклад:\n"
-        "• The Weeknd Blinding Lights\n"
-        "• Океан Ельзи Обійми\n"
-        "• музика в авто\n\n"
+        "Знайди музику під свій настрій ✨\n\n"
+        "🔎 Напиши назву пісні або виконавця\n"
+        "або обери категорію нижче 👇\n\n"
         "🎧 Також можеш надіслати свій MP3/M4A — "
         "його можна слухати прямо в Telegram.",
         reply_markup=main_keyboard(),
     )
 
 
-# =========================
+# =========================================================
 # КНОПКА ПОШУКУ
-# =========================
+# =========================================================
 
 async def search_button(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     await update.message.reply_text(
-        "🔎 Напиши назву пісні або виконавця 👇\n\n"
+        "🔎 Що хочеш послухати?\n\n"
+        "Напиши назву пісні або виконавця 👇\n\n"
         "Наприклад:\n"
-        "The Weeknd Blinding Lights"
+        "The Weeknd Blinding Lights\n"
+        "Океан Ельзи Обійми"
     )
 
 
-# =========================
-# ЯК СЛУХАТИ
-# =========================
+# =========================================================
+# HELP
+# =========================================================
 
 async def help_audio(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     await update.message.reply_text(
-        "🎧 Як працює WAVE\n\n"
-        "🔎 Напиши назву пісні — WAVE знайде "
+        "🎧 Як слухати музику у WAVE\n\n"
+        "🔎 Напиши назву пісні — бот знайде "
         "варіанти на музичних сервісах.\n\n"
-        "📎 Якщо надішлеш свій MP3/M4A файл, "
-        "WAVE поверне його як аудіоплеєр Telegram ▶️"
+        "▶️ YouTube — відкриває оригінал.\n"
+        "🟢 Spotify — шукає трек у Spotify.\n"
+        "☁️ SoundCloud — шукає у SoundCloud.\n\n"
+        "📎 Свій MP3/M4A можеш надіслати прямо "
+        "в цей чат — він відкриється у плеєрі Telegram."
     )
 
 
-# =========================
+# =========================================================
 # YOUTUBE SEARCH
-# =========================
+# =========================================================
 
 def youtube_search(query: str):
     options = {
@@ -104,16 +110,16 @@ def youtube_search(query: str):
 
     with yt_dlp.YoutubeDL(options) as ydl:
         data = ydl.extract_info(
-            f"ytsearch12:{query}",
+            f"ytsearch15:{query}",
             download=False,
         )
 
     return data.get("entries", [])
 
 
-# =========================
-# ФІЛЬТРАЦІЯ
-# =========================
+# =========================================================
+# ФІЛЬТР РЕЗУЛЬТАТІВ
+# =========================================================
 
 def is_bad_result(item):
     title = (item.get("title") or "").lower()
@@ -122,8 +128,9 @@ def is_bad_result(item):
         "1 hour",
         "1hour",
         "one hour",
+        "2 hours",
+        "3 hours",
         "10 hours",
-        "10 hour",
         "8d audio",
         "slowed",
         "reverb",
@@ -136,18 +143,16 @@ def is_bad_result(item):
         "cover",
     ]
 
-    return any(
-        word in title
-        for word in bad_words
-    )
+    return any(word in title for word in bad_words)
 
 
 def prepare_results(entries):
     good = []
     fallback = []
-    seen_ids = set()
+    seen = set()
 
     for item in entries:
+
         if not item:
             continue
 
@@ -156,10 +161,10 @@ def prepare_results(entries):
         if not video_id:
             continue
 
-        if video_id in seen_ids:
+        if video_id in seen:
             continue
 
-        seen_ids.add(video_id)
+        seen.add(video_id)
 
         if is_bad_result(item):
             fallback.append(item)
@@ -169,40 +174,32 @@ def prepare_results(entries):
     results = good[:5]
 
     if len(results) < 5:
-        needed = 5 - len(results)
         results.extend(
-            fallback[:needed]
+            fallback[:5 - len(results)]
         )
 
     return results
 
 
-# =========================
-# ПОШУК МУЗИКИ
-# =========================
+# =========================================================
+# ВІДПРАВКА РЕЗУЛЬТАТІВ
+# =========================================================
 
-async def search_music(
+async def perform_search(
     update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
+    query: str,
+    display_query: str = None,
 ):
-    query = update.message.text.strip()
 
-    if not query:
-        return
-
-    # Не відправляємо /команди у пошук
-    if query.startswith("/"):
-        await update.message.reply_text(
-            "💡 Для запуску WAVE натисни /start",
-            reply_markup=main_keyboard(),
-        )
-        return
+    if display_query is None:
+        display_query = query
 
     loading = await update.message.reply_text(
         "🔎 WAVE шукає музику..."
     )
 
     try:
+
         entries = await asyncio.to_thread(
             youtube_search,
             query,
@@ -216,11 +213,12 @@ async def search_music(
             pass
 
         if not results:
+
             await update.message.reply_text(
                 "😕 Нічого не знайшов.\n\n"
-                "Спробуй написати назву пісні "
-                "та виконавця точніше."
+                "Спробуй інший запит."
             )
+
             return
 
         encoded_query = quote_plus(query)
@@ -236,8 +234,7 @@ async def search_music(
         )
 
         await update.message.reply_text(
-            "🎧 Результати для:\n\n"
-            f"🔎 {query}\n\n"
+            f"🎧 {display_query}\n\n"
             f"Знайшов {len(results)} варіантів 👇"
         )
 
@@ -245,6 +242,7 @@ async def search_music(
             results,
             start=1,
         ):
+
             video_id = item.get("id")
 
             title = (
@@ -296,6 +294,7 @@ async def search_music(
             )
 
             try:
+
                 await update.message.reply_photo(
                     photo=thumbnail,
                     caption=caption,
@@ -303,10 +302,8 @@ async def search_music(
                 )
 
             except Exception as error:
-                print(
-                    "PHOTO ERROR:",
-                    error,
-                )
+
+                print("PHOTO ERROR:", error)
 
                 await update.message.reply_text(
                     caption,
@@ -314,10 +311,8 @@ async def search_music(
                 )
 
     except Exception as error:
-        print(
-            "SEARCH ERROR:",
-            error,
-        )
+
+        print("SEARCH ERROR:", error)
 
         try:
             await loading.delete()
@@ -325,22 +320,114 @@ async def search_music(
             pass
 
         await update.message.reply_text(
-            "⚠️ Не вдалося виконати пошук.\n"
+            "⚠️ WAVE зараз не зміг виконати пошук.\n"
             "Спробуй ще раз."
         )
 
 
-# =========================
-# ВЛАСНІ АУДІОФАЙЛИ
-# =========================
+# =========================================================
+# ЗВИЧАЙНИЙ ПОШУК
+# =========================================================
+
+async def search_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    query = update.message.text.strip()
+
+    if not query:
+        return
+
+    # Невідома команда
+    if query.startswith("/"):
+
+        await update.message.reply_text(
+            "💡 Для запуску WAVE використовуй /start",
+            reply_markup=main_keyboard(),
+        )
+
+        return
+
+    await perform_search(
+        update,
+        query,
+        f"Результати для:\n🔎 {query}",
+    )
+
+
+# =========================================================
+# КАТЕГОРІЇ
+# =========================================================
+
+async def car_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await perform_search(
+        update,
+        "best driving music playlist hits",
+        "🚗 Музика в авто",
+    )
+
+
+async def sport_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await perform_search(
+        update,
+        "best workout gym music hits",
+        "🏋️ Музика для спорту",
+    )
+
+
+async def sleep_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await perform_search(
+        update,
+        "relaxing sleep music",
+        "😴 Музика для сну",
+    )
+
+
+async def party_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await perform_search(
+        update,
+        "best party hits music",
+        "🎉 Музика для вечірки",
+    )
+
+
+async def ukrainian_music(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await perform_search(
+        update,
+        "українські пісні хіти",
+        "🇺🇦 Українська музика",
+    )
+
+
+# =========================================================
+# ВЛАСНІ MP3 / M4A
+# =========================================================
 
 async def receive_audio(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     message = update.message
 
     if message.audio:
+
         audio = message.audio
 
         title = (
@@ -398,6 +485,7 @@ async def receive_audio(
         return
 
     try:
+
         await message.reply_audio(
             audio=document.file_id,
             title=filename,
@@ -406,17 +494,23 @@ async def receive_audio(
         )
 
     except Exception as error:
+
         print(
             "AUDIO ERROR:",
             error,
         )
 
+        await message.reply_text(
+            "⚠️ Не вдалося відкрити цей аудіофайл."
+        )
 
-# =========================
+
+# =========================================================
 # MAIN
-# =========================
+# =========================================================
 
 def main():
+
     app = (
         Application.builder()
         .token(TOKEN)
@@ -431,13 +525,59 @@ def main():
         )
     )
 
-    # Кнопка пошуку
+    # Пошук
     app.add_handler(
         MessageHandler(
             filters.Regex(
                 r"^🔎 Пошук музики$"
             ),
             search_button,
+        )
+    )
+
+    # Категорії
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(
+                r"^🚗 В авто$"
+            ),
+            car_music,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(
+                r"^🏋️ Для спорту$"
+            ),
+            sport_music,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(
+                r"^😴 Для сну$"
+            ),
+            sleep_music,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(
+                r"^🎉 Для вечірки$"
+            ),
+            party_music,
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(
+                r"^🇺🇦 Українська музика$"
+            ),
+            ukrainian_music,
         )
     )
 
@@ -451,7 +591,7 @@ def main():
         )
     )
 
-    # MP3 / audio
+    # Аудіо
     app.add_handler(
         MessageHandler(
             filters.AUDIO,
@@ -466,7 +606,7 @@ def main():
         )
     )
 
-    # Звичайний текст = пошук
+    # Звичайний текст
     app.add_handler(
         MessageHandler(
             filters.TEXT
@@ -475,7 +615,9 @@ def main():
         )
     )
 
-    print("🎵 WAVE bot started")
+    print(
+        "🎵 WAVE 2.0 started"
+    )
 
     app.run_polling()
 
