@@ -16,6 +16,7 @@ from telegram.ext import (
 
 TOKEN = os.environ["BOT_TOKEN"]
 DATABASE_URL = os.environ["DATABASE_URL"]
+BOT_USERNAME = "wave_music_ua_bot"
 
 PER_PAGE = 5
 
@@ -25,6 +26,8 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         ["📂 Мої плейлисти", "🎯 Рекомендації"],
         ["🕘 Історія", "🔥 Популярне"],
         ["👤 Профіль", "⭐ Виконавці"],
+        ["👥 Запрошення", "📊 Статистика WAVE"],
+        ["📤 Поділитися WAVE"],
         ["🚗 В авто", "🏋️ Для спорту"],
         ["😴 Для сну", "🎉 Для вечірки"],
         ["🇺🇦 Українська музика", "🆕 Новинки"],
@@ -135,6 +138,20 @@ def init_database():
                 );
             """)
 
+            # Безпечне оновлення існуючої таблиці users
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS referred_by BIGINT;
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+            """)
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS actions INTEGER DEFAULT 0;
+            """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS search_history (
                     id SERIAL PRIMARY KEY,
@@ -154,19 +171,91 @@ def init_database():
     print("PostgreSQL ready")
 
 
-def db_register_user(user_id, username, first_name):
+def db_register_user(user_id, username, first_name, referred_by=None):
+    # Самого себе запросити не можна
+    if referred_by == user_id:
+        referred_by = None
+
     with psycopg.connect(DATABASE_URL) as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO users (user_id, username, first_name)
-                VALUES (%s, %s, %s)
+                INSERT INTO users (
+                    user_id, username, first_name, referred_by, last_seen, actions
+                )
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, 1)
                 ON CONFLICT (user_id)
                 DO UPDATE SET
                     username = EXCLUDED.username,
-                    first_name = EXCLUDED.first_name;
-            """, (user_id, username, first_name))
+                    first_name = EXCLUDED.first_name,
+                    last_seen = CURRENT_TIMESTAMP,
+                    actions = COALESCE(users.actions, 0) + 1;
+            """, (user_id, username, first_name, referred_by))
         conn.commit()
 
+
+def db_touch_user(user_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE users
+                SET last_seen = CURRENT_TIMESTAMP,
+                    actions = COALESCE(actions, 0) + 1
+                WHERE user_id = %s;
+            """, (user_id,))
+        conn.commit()
+
+
+def db_referral_stats(user_id):
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM users
+                WHERE referred_by = %s;
+            """, (user_id,))
+            invited = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM users
+                WHERE referred_by = %s
+                  AND last_seen >= CURRENT_TIMESTAMP - INTERVAL '7 days';
+            """, (user_id,))
+            active_invited = cur.fetchone()[0]
+
+    return invited, active_invited
+
+
+def db_wave_stats():
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM users;")
+            users = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM users
+                WHERE last_seen >= CURRENT_TIMESTAMP - INTERVAL '7 days';
+            """)
+            active_7d = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM favorites;")
+            favorites = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM playlists;")
+            playlists = cur.fetchone()[0]
+
+            cur.execute("SELECT COUNT(*) FROM search_history;")
+            searches = cur.fetchone()[0]
+
+            cur.execute("""
+                SELECT COUNT(*)
+                FROM users
+                WHERE referred_by IS NOT NULL;
+            """)
+            referrals = cur.fetchone()[0]
+
+    return users, active_7d, favorites, playlists, searches, referrals
 
 def db_add_history(user_id, search_text):
     with psycopg.connect(DATABASE_URL) as conn:
@@ -510,7 +599,7 @@ def clear_modes(context):
     context.user_data.pop("playlist_create_mode", None)
 
 
-async def register_current_user(update):
+async def register_current_user(update, referred_by=None):
     user = update.effective_user
     if not user:
         return
@@ -520,6 +609,7 @@ async def register_current_user(update):
             user.id,
             user.username,
             user.first_name,
+            referred_by,
         )
     except Exception as error:
         print("Register user error:", error)
@@ -903,13 +993,81 @@ async def recommendations(update, context):
     await send_results(update, context, query, save_history=False)
 
 
+
+async def show_referrals(update):
+    user_id = update.effective_user.id
+    invited, active_invited = await asyncio.to_thread(db_referral_stats, user_id)
+    link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+
+    share_text = quote_plus(
+        "🎵 Спробуй WAVE — музичний бот у Telegram 🇺🇦\n"
+        "🔎 Пошук • ❤️ Обране • 📂 Плейлисти • 🎯 Рекомендації"
+    )
+    share_url = f"https://t.me/share/url?url={quote_plus(link)}&text={share_text}"
+
+    await update.message.reply_text(
+        f"👥 Твої запрошення\n\n"
+        f"👤 Запрошено: {invited}\n"
+        f"🟢 Активні за 7 днів: {active_invited}\n\n"
+        f"🔗 Твоє персональне посилання:\n{link}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Запросити друзів", url=share_url)]
+        ]),
+    )
+
+
+async def share_wave(update):
+    user_id = update.effective_user.id
+    link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
+    share_text = quote_plus(
+        "🎵 Спробуй WAVE — музичний бот у Telegram 🇺🇦\n"
+        "🔎 Шукай музику, зберігай улюблене та створюй плейлисти."
+    )
+    share_url = f"https://t.me/share/url?url={quote_plus(link)}&text={share_text}"
+
+    await update.message.reply_text(
+        "📤 Поділися WAVE з друзями 👇\n\n"
+        f"Кожен, хто зайде за твоїм посиланням, буде зарахований як запрошений.\n\n"
+        f"🔗 {link}",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📤 Поділитися", url=share_url)]
+        ]),
+    )
+
+
+async def show_wave_stats(update):
+    users, active_7d, favorites, playlists, searches, referrals = await asyncio.to_thread(
+        db_wave_stats
+    )
+    await update.message.reply_text(
+        f"📊 Статистика WAVE\n\n"
+        f"👥 Користувачів: {users}\n"
+        f"🟢 Активні за 7 днів: {active_7d}\n"
+        f"🤝 Прийшли за запрошеннями: {referrals}\n\n"
+        f"❤️ Збережено треків: {favorites}\n"
+        f"📂 Створено плейлистів: {playlists}\n"
+        f"🔎 Пошуків: {searches}",
+        reply_markup=MAIN_KEYBOARD,
+    )
+
+
 # =========================================================
 # START
 # =========================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_modes(context)
-    await register_current_user(update)
+
+    referred_by = None
+    if context.args:
+        payload = context.args[0]
+        if payload.startswith("ref_"):
+            try:
+                referred_by = int(payload.split("_", 1)[1])
+            except (ValueError, IndexError):
+                referred_by = None
+
+    await register_current_user(update, referred_by=referred_by)
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
         "🔎 Шукай музику\n"
@@ -1243,6 +1401,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text == "🎯 Рекомендації":
         await recommendations(update, context)
+        return
+
+    if text == "📤 Поділитися WAVE":
+        await share_wave(update)
+        return
+
+    if text == "👥 Запрошення":
+        await show_referrals(update)
+        return
+
+    if text == "📊 Статистика WAVE":
+        await show_wave_stats(update)
         return
 
     if text == "👤 Профіль":
