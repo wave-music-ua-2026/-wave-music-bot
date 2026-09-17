@@ -1,9 +1,9 @@
 import os
-import json
 import asyncio
 from urllib.parse import quote_plus
 
 import yt_dlp
+import psycopg
 
 from telegram import (
     Update,
@@ -21,13 +21,16 @@ from telegram.ext import (
 )
 
 
-TOKEN = os.environ["BOT_TOKEN"]
+# =========================================================
+# НАЛАШТУВАННЯ
+# =========================================================
 
-FAVORITES_FILE = "favorites.json"
+TOKEN = os.environ["BOT_TOKEN"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 
 # =========================================================
-# МЕНЮ
+# ГОЛОВНЕ МЕНЮ
 # =========================================================
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -94,78 +97,154 @@ SLEEP_KEYBOARD = ReplyKeyboardMarkup(
 
 
 # =========================================================
-# ОБРАНЕ
+# POSTGRESQL
 # =========================================================
 
-def load_favorites():
-    try:
-        with open(FAVORITES_FILE, "r", encoding="utf-8") as file:
-            return json.load(file)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
+def init_database():
+    """
+    Створює таблицю favorites автоматично,
+    якщо її ще немає.
+    """
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS favorites (
+                    id SERIAL PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    video_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    artist TEXT,
+                    duration INTEGER,
+                    thumbnail TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, video_id)
+                );
+                """
+            )
+
+        conn.commit()
+
+    print("PostgreSQL ready")
 
 
-def save_favorites(data):
-    with open(FAVORITES_FILE, "w", encoding="utf-8") as file:
-        json.dump(
-            data,
-            file,
-            ensure_ascii=False,
-            indent=2,
+def db_add_favorite(user_id, track):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                INSERT INTO favorites (
+                    user_id,
+                    video_id,
+                    title,
+                    artist,
+                    duration,
+                    thumbnail
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, video_id)
+                DO NOTHING
+                RETURNING id;
+                """,
+                (
+                    user_id,
+                    track["id"],
+                    track["title"],
+                    track["artist"],
+                    track.get("duration"),
+                    track.get("thumbnail"),
+                ),
+            )
+
+            result = cur.fetchone()
+
+        conn.commit()
+
+    return result is not None
+
+
+def db_get_favorites(user_id):
+
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                SELECT
+                    video_id,
+                    title,
+                    artist,
+                    duration,
+                    thumbnail
+                FROM favorites
+                WHERE user_id = %s
+                ORDER BY created_at DESC;
+                """,
+                (user_id,),
+            )
+
+            rows = cur.fetchall()
+
+    tracks = []
+
+    for row in rows:
+
+        tracks.append(
+            {
+                "id": row[0],
+                "title": row[1],
+                "artist": row[2],
+                "duration": row[3],
+                "thumbnail": row[4],
+            }
         )
 
-
-def add_favorite(user_id, track):
-    data = load_favorites()
-
-    uid = str(user_id)
-
-    if uid not in data:
-        data[uid] = []
-
-    # Не додаємо один трек двічі
-    for saved_track in data[uid]:
-        if saved_track.get("id") == track.get("id"):
-            return False
-
-    data[uid].append(track)
-
-    save_favorites(data)
-
-    return True
+    return tracks
 
 
-def remove_favorite(user_id, video_id):
-    data = load_favorites()
+def db_remove_favorite(user_id, video_id):
 
-    uid = str(user_id)
+    with psycopg.connect(DATABASE_URL) as conn:
 
-    if uid not in data:
-        return
+        with conn.cursor() as cur:
 
-    data[uid] = [
-        track
-        for track in data[uid]
-        if track.get("id") != video_id
-    ]
+            cur.execute(
+                """
+                DELETE FROM favorites
+                WHERE user_id = %s
+                AND video_id = %s;
+                """,
+                (
+                    user_id,
+                    video_id,
+                ),
+            )
 
-    save_favorites(data)
-
-
-def clear_favorites(user_id):
-    data = load_favorites()
-
-    uid = str(user_id)
-
-    data[uid] = []
-
-    save_favorites(data)
+        conn.commit()
 
 
-def get_favorites(user_id):
-    data = load_favorites()
+def db_clear_favorites(user_id):
 
-    return data.get(str(user_id), [])
+    with psycopg.connect(DATABASE_URL) as conn:
+
+        with conn.cursor() as cur:
+
+            cur.execute(
+                """
+                DELETE FROM favorites
+                WHERE user_id = %s;
+                """,
+                (user_id,),
+            )
+
+        conn.commit()
 
 
 # =========================================================
@@ -173,11 +252,13 @@ def get_favorites(user_id):
 # =========================================================
 
 def format_duration(seconds):
+
     if not seconds:
         return "—"
 
     try:
         seconds = int(seconds)
+
     except (ValueError, TypeError):
         return "—"
 
@@ -192,6 +273,7 @@ def format_duration(seconds):
 
 
 def clean_text(text, max_length=500):
+
     if not text:
         return ""
 
@@ -211,6 +293,7 @@ async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
         "🔎 Напиши назву пісні або виконавця.\n\n"
@@ -218,7 +301,7 @@ async def start(
         "• The Weeknd Blinding Lights\n"
         "• Океан Ельзи Обійми\n"
         "• музика в авто\n\n"
-        "❤️ Улюблені треки можна зберігати "
+        "❤️ Зберігай улюблені треки "
         "в розділі «Моя музика».\n\n"
         "🎧 Також можеш надіслати свій MP3/M4A — "
         "його можна слухати прямо в Telegram.",
@@ -231,6 +314,7 @@ async def start(
 # =========================================================
 
 def youtube_search_sync(query, limit=5):
+
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -240,7 +324,9 @@ def youtube_search_sync(query, limit=5):
     }
 
     try:
+
         with yt_dlp.YoutubeDL(options) as ydl:
+
             result = ydl.extract_info(
                 f"ytsearch{limit}:{query}",
                 download=False,
@@ -249,11 +335,14 @@ def youtube_search_sync(query, limit=5):
             return result.get("entries", [])
 
     except Exception as error:
+
         print("YouTube search error:", error)
+
         return []
 
 
 async def youtube_search(query, limit=5):
+
     return await asyncio.to_thread(
         youtube_search_sync,
         query,
@@ -271,6 +360,7 @@ async def send_track_card(
     index=None,
     favorite_mode=False,
 ):
+
     video_id = item.get("id")
 
     if not video_id:
@@ -282,9 +372,9 @@ async def send_track_card(
     )
 
     artist = clean_text(
-        item.get("channel")
+        item.get("artist")
+        or item.get("channel")
         or item.get("uploader")
-        or item.get("channel_id")
         or "YouTube",
         100,
     )
@@ -295,16 +385,16 @@ async def send_track_card(
         f"https://www.youtube.com/watch?v={video_id}"
     )
 
-    search_text = f"{title} {artist}"
+    service_query = f"{artist} {title}"
 
     spotify_url = (
         "https://open.spotify.com/search/"
-        + quote_plus(search_text)
+        + quote_plus(service_query)
     )
 
     soundcloud_url = (
         "https://soundcloud.com/search?q="
-        + quote_plus(search_text)
+        + quote_plus(service_query)
     )
 
     thumbnail = (
@@ -340,6 +430,7 @@ async def send_track_card(
     ]
 
     if favorite_mode:
+
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -350,6 +441,7 @@ async def send_track_card(
         )
 
     else:
+
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -362,6 +454,7 @@ async def send_track_card(
     keyboard = InlineKeyboardMarkup(buttons)
 
     try:
+
         await message.reply_photo(
             photo=thumbnail,
             caption=caption,
@@ -369,6 +462,7 @@ async def send_track_card(
         )
 
     except Exception as error:
+
         print("Photo error:", error)
 
         await message.reply_text(
@@ -378,7 +472,7 @@ async def send_track_card(
 
 
 # =========================================================
-# РЕЗУЛЬТАТИ ПОШУКУ
+# ПОШУК
 # =========================================================
 
 async def send_results(
@@ -386,29 +480,35 @@ async def send_results(
     context: ContextTypes.DEFAULT_TYPE,
     query,
 ):
+
     status = await update.message.reply_text(
         f"🔎 Шукаю «{query}»..."
     )
 
-    results = await youtube_search(query, 5)
+    results = await youtube_search(
+        query,
+        5,
+    )
 
     try:
         await status.delete()
+
     except Exception:
         pass
 
     if not results:
+
         await update.message.reply_text(
             "😕 Нічого не знайшов.\n\n"
             "Спробуй написати назву трохи інакше."
         )
+
         return
 
-    # Зберігаємо результати тимчасово,
-    # щоб кнопка ❤️ знала, який трек додавати.
     tracks = {}
 
     for item in results:
+
         video_id = item.get("id")
 
         if not video_id:
@@ -437,7 +537,11 @@ async def send_results(
         f"Знайшов {len(tracks)} варіантів 👇"
     )
 
-    for index, item in enumerate(results, start=1):
+    for index, item in enumerate(
+        results,
+        start=1,
+    ):
+
         await send_track_card(
             update.message,
             item,
@@ -446,26 +550,26 @@ async def send_results(
 
 
 # =========================================================
-# CALLBACK — ❤️ ЗБЕРЕГТИ / 🗑 ВИДАЛИТИ
+# CALLBACK КНОПКИ
 # =========================================================
 
 async def button_callback(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    query = update.callback_query
 
-    await query.answer()
+    query = update.callback_query
 
     data = query.data
 
     user_id = query.from_user.id
 
-    # -------------------------
-    # ЗБЕРЕГТИ
-    # -------------------------
+    # -----------------------------------------------------
+    # ❤️ ЗБЕРЕГТИ
+    # -----------------------------------------------------
 
     if data.startswith("save:"):
+
         video_id = data.split(":", 1)[1]
 
         tracks = context.user_data.get(
@@ -475,50 +579,43 @@ async def button_callback(
 
         track = tracks.get(video_id)
 
-        # Якщо даних уже немає в user_data,
-        # дістаємо інформацію з YouTube.
         if not track:
-            results = await youtube_search(
-                f"https://www.youtube.com/watch?v={video_id}",
-                1,
-            )
 
-            if results:
-                item = results[0]
-
-                track = {
-                    "id": video_id,
-                    "title": item.get("title") or "Без назви",
-                    "artist": (
-                        item.get("channel")
-                        or item.get("uploader")
-                        or "YouTube"
-                    ),
-                    "duration": item.get("duration"),
-                    "thumbnail": (
-                        item.get("thumbnail")
-                        or f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-                    ),
-                }
-
-        if not track:
             await query.answer(
-                "Не вдалося зберегти трек 😕",
+                "Зроби пошук треку ще раз 🎵",
                 show_alert=True,
             )
+
             return
 
-        added = add_favorite(
-            user_id,
-            track,
-        )
+        try:
+
+            added = await asyncio.to_thread(
+                db_add_favorite,
+                user_id,
+                track,
+            )
+
+        except Exception as error:
+
+            print("Database save error:", error)
+
+            await query.answer(
+                "Помилка збереження 😕",
+                show_alert=True,
+            )
+
+            return
 
         if added:
+
             await query.answer(
                 "❤️ Додано в «Моя музика»",
                 show_alert=True,
             )
+
         else:
+
             await query.answer(
                 "Цей трек уже збережений ❤️",
                 show_alert=True,
@@ -526,69 +623,115 @@ async def button_callback(
 
         return
 
-    # -------------------------
-    # ВИДАЛИТИ
-    # -------------------------
+    # -----------------------------------------------------
+    # 🗑 ВИДАЛИТИ
+    # -----------------------------------------------------
 
     if data.startswith("remove:"):
+
         video_id = data.split(":", 1)[1]
 
-        remove_favorite(
-            user_id,
-            video_id,
-        )
-
-        await query.answer(
-            "🗑 Видалено з обраного",
-            show_alert=True,
-        )
-
         try:
-            await query.message.delete()
-        except Exception:
-            pass
+
+            await asyncio.to_thread(
+                db_remove_favorite,
+                user_id,
+                video_id,
+            )
+
+            await query.answer(
+                "🗑 Видалено",
+            )
+
+            try:
+                await query.message.delete()
+
+            except Exception:
+                pass
+
+        except Exception as error:
+
+            print("Database remove error:", error)
+
+            await query.answer(
+                "Не вдалося видалити 😕",
+                show_alert=True,
+            )
 
         return
 
-    # -------------------------
-    # ОЧИСТИТИ ВСЕ
-    # -------------------------
+    # -----------------------------------------------------
+    # 🗑 ОЧИСТИТИ ВСЕ
+    # -----------------------------------------------------
 
     if data == "clear_favorites":
-        clear_favorites(user_id)
 
-        await query.answer(
-            "🗑 Обране очищено",
-            show_alert=True,
-        )
+        try:
 
-        await query.message.reply_text(
-            "❤️ У «Моя музика» поки немає треків.",
-            reply_markup=MAIN_KEYBOARD,
-        )
+            await asyncio.to_thread(
+                db_clear_favorites,
+                user_id,
+            )
+
+            await query.answer(
+                "🗑 Обране очищено",
+                show_alert=True,
+            )
+
+            await query.message.reply_text(
+                "❤️ У «Моя музика» тепер порожньо.",
+                reply_markup=MAIN_KEYBOARD,
+            )
+
+        except Exception as error:
+
+            print("Database clear error:", error)
+
+            await query.answer(
+                "Помилка бази даних 😕",
+                show_alert=True,
+            )
 
         return
 
 
 # =========================================================
-# МОЯ МУЗИКА
+# ❤️ МОЯ МУЗИКА
 # =========================================================
 
 async def show_favorites(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     user_id = update.effective_user.id
 
-    favorites = get_favorites(user_id)
+    try:
+
+        favorites = await asyncio.to_thread(
+            db_get_favorites,
+            user_id,
+        )
+
+    except Exception as error:
+
+        print("Database read error:", error)
+
+        await update.message.reply_text(
+            "😕 Не вдалося відкрити «Моя музика»."
+        )
+
+        return
 
     if not favorites:
+
         await update.message.reply_text(
             "❤️ У «Моя музика» поки порожньо.\n\n"
             "Знайди пісню та натисни "
-            "«❤️ Зберегти» під карткою треку.",
+            "«❤️ Зберегти» під карткою.",
             reply_markup=MAIN_KEYBOARD,
         )
+
         return
 
     await update.message.reply_text(
@@ -600,6 +743,7 @@ async def show_favorites(
         favorites,
         start=1,
     ):
+
         await send_track_card(
             update.message,
             track,
@@ -607,7 +751,7 @@ async def show_favorites(
             favorite_mode=True,
         )
 
-    clear_keyboard = InlineKeyboardMarkup(
+    keyboard = InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
@@ -620,21 +764,23 @@ async def show_favorites(
 
     await update.message.reply_text(
         "❤️ Кінець списку",
-        reply_markup=clear_keyboard,
+        reply_markup=keyboard,
     )
 
 
 # =========================================================
-# MP3 / M4A
+# MP3 / AUDIO
 # =========================================================
 
 async def handle_audio(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     audio = update.message.audio
 
     if audio:
+
         title = (
             audio.title
             or audio.file_name
@@ -657,6 +803,7 @@ async def handle_audio(
     document = update.message.document
 
     if document:
+
         mime = document.mime_type or ""
         filename = document.file_name or ""
 
@@ -672,6 +819,7 @@ async def handle_audio(
                 )
             )
         ):
+
             file = await document.get_file()
 
             await update.message.reply_audio(
@@ -688,60 +836,142 @@ async def handle_text(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
+
     text = update.message.text.strip()
 
+    # -----------------------------------------------------
     # ГОЛОВНЕ МЕНЮ
+    # -----------------------------------------------------
 
     if text in (
         "🏠 Головне меню",
         "⬅️ Назад",
     ):
+
         await update.message.reply_text(
             "🎵 WAVE | Головне меню",
             reply_markup=MAIN_KEYBOARD,
         )
+
         return
 
+    # -----------------------------------------------------
     # МОЯ МУЗИКА
+    # -----------------------------------------------------
 
     if text == "❤️ Моя музика":
+
         await show_favorites(
             update,
             context,
         )
+
         return
 
+    # -----------------------------------------------------
     # ПОШУК
+    # -----------------------------------------------------
 
     if text == "🔎 Пошук музики":
+
         await update.message.reply_text(
             "🔎 Напиши назву пісні або виконавця 👇",
             reply_markup=MAIN_KEYBOARD,
         )
+
         return
 
+    # -----------------------------------------------------
     # TELEGRAM AUDIO
+    # -----------------------------------------------------
 
     if text == "🎧 Як слухати в Telegram":
+
         await update.message.reply_text(
             "🎧 Як слухати музику прямо в Telegram\n\n"
             "Надішли боту свій MP3 або M4A файл.\n\n"
             "Telegram покаже вбудований плеєр ▶️",
             reply_markup=MAIN_KEYBOARD,
         )
+
         return
 
+    # -----------------------------------------------------
     # УКРАЇНСЬКА МУЗИКА
+    # -----------------------------------------------------
 
     if text == "🇺🇦 Українська музика":
+
         await update.message.reply_text(
             "🇺🇦 Українська музика\n\n"
             "Обери жанр 👇",
             reply_markup=UKRAINIAN_KEYBOARD,
         )
+
         return
 
+    # -----------------------------------------------------
+    # АВТО
+    # -----------------------------------------------------
+
+    if text == "🚗 В авто":
+
+        await update.message.reply_text(
+            "🚗 Музика в авто\n\n"
+            "Обери настрій 👇",
+            reply_markup=CAR_KEYBOARD,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # СПОРТ
+    # -----------------------------------------------------
+
+    if text == "🏋️ Для спорту":
+
+        await update.message.reply_text(
+            "🏋️ Музика для спорту\n\n"
+            "Обери режим 👇",
+            reply_markup=SPORT_KEYBOARD,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # ВЕЧІРКА
+    # -----------------------------------------------------
+
+    if text == "🎉 Для вечірки":
+
+        await update.message.reply_text(
+            "🎉 Музика для вечірки\n\n"
+            "Обери стиль 👇",
+            reply_markup=PARTY_KEYBOARD,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # СОН
+    # -----------------------------------------------------
+
+    if text == "😴 Для сну":
+
+        await update.message.reply_text(
+            "😴 Музика для сну\n\n"
+            "Обери 👇",
+            reply_markup=SLEEP_KEYBOARD,
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # КАТЕГОРІЇ
+    # -----------------------------------------------------
+
     categories = {
+
         "🔥 Українські хіти":
             "українські музичні хіти",
 
@@ -806,51 +1036,19 @@ async def handle_text(
             "relaxing chill music",
     }
 
-    # ПІДМЕНЮ
-
-    if text == "🚗 В авто":
-        await update.message.reply_text(
-            "🚗 Музика в авто\n\n"
-            "Обери настрій 👇",
-            reply_markup=CAR_KEYBOARD,
-        )
-        return
-
-    if text == "🏋️ Для спорту":
-        await update.message.reply_text(
-            "🏋️ Музика для спорту\n\n"
-            "Обери режим 👇",
-            reply_markup=SPORT_KEYBOARD,
-        )
-        return
-
-    if text == "🎉 Для вечірки":
-        await update.message.reply_text(
-            "🎉 Музика для вечірки\n\n"
-            "Обери стиль 👇",
-            reply_markup=PARTY_KEYBOARD,
-        )
-        return
-
-    if text == "😴 Для сну":
-        await update.message.reply_text(
-            "😴 Музика для сну\n\n"
-            "Обери 👇",
-            reply_markup=SLEEP_KEYBOARD,
-        )
-        return
-
-    # КАТЕГОРІЯ
-
     if text in categories:
+
         await send_results(
             update,
             context,
             categories[text],
         )
+
         return
 
+    # -----------------------------------------------------
     # ЗВИЧАЙНИЙ ПОШУК
+    # -----------------------------------------------------
 
     await send_results(
         update,
@@ -864,6 +1062,13 @@ async def handle_text(
 # =========================================================
 
 def main():
+
+    print("Connecting to PostgreSQL...")
+
+    init_database()
+
+    print("Starting WAVE bot...")
+
     app = (
         Application.builder()
         .token(TOKEN)
