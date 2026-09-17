@@ -17,22 +17,21 @@ TOKEN = os.environ["BOT_TOKEN"]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
-        "Напиши назву пісні або виконавця — "
-        "я знайду трек для тебе 🔎\n\n"
-        "Наприклад:\n"
-        "🎤 The Weeknd Blinding Lights"
+        "🔎 Напиши назву пісні — я знайду її на YouTube.\n\n"
+        "🎧 Або надішли мені свій MP3/M4A — "
+        "його можна буде слухати прямо в Telegram."
     )
 
 
 def find_youtube_track(query: str):
-    ydl_opts = {
+    options = {
         "quiet": True,
         "no_warnings": True,
         "skip_download": True,
         "extract_flat": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(
             f"ytsearch1:{query}",
             download=False
@@ -44,8 +43,8 @@ def find_youtube_track(query: str):
         return None
 
     video = entries[0]
-
     video_id = video.get("id")
+
     if not video_id:
         return None
 
@@ -57,7 +56,9 @@ def find_youtube_track(query: str):
             or "YouTube"
         ),
         "url": f"https://www.youtube.com/watch?v={video_id}",
-        "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
+        "thumbnail": (
+            f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        ),
     }
 
 
@@ -82,7 +83,7 @@ async def search_music(
 
         if not track:
             await status.edit_text(
-                "😕 Нічого не знайшов. Спробуй іншу назву."
+                "😕 Нічого не знайшов."
             )
             return
 
@@ -98,7 +99,7 @@ async def search_music(
         caption = (
             f"🎵 {track['title']}\n"
             f"👤 {track['channel']}\n\n"
-            "👇 Натисни, щоб відкрити трек"
+            "▶️ Відкрити оригінал:"
         )
 
         try:
@@ -108,8 +109,6 @@ async def search_music(
                 reply_markup=keyboard
             )
         except Exception:
-            # Якщо Telegram не зможе завантажити обкладинку,
-            # результат все одно буде показаний.
             await update.message.reply_text(
                 caption,
                 reply_markup=keyboard
@@ -121,9 +120,57 @@ async def search_music(
         print(f"Search error: {error}")
 
         await status.edit_text(
-            "⚠️ Не вдалося знайти трек.\n"
-            "Спробуй ще раз через кілька секунд."
+            "⚠️ Помилка пошуку. Спробуй ще раз."
         )
+
+
+async def receive_audio(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    audio = update.message.audio
+
+    if not audio:
+        return
+
+    title = audio.title or "WAVE Track"
+    performer = audio.performer or "WAVE"
+
+    await update.message.reply_text(
+        "✅ Аудіо отримано.\n"
+        "Зараз надсилаю його через плеєр Telegram 👇"
+    )
+
+    await context.bot.send_audio(
+        chat_id=update.effective_chat.id,
+        audio=audio.file_id,
+        title=title,
+        performer=performer,
+        caption="🎧 Слухай прямо в Telegram"
+    )
+
+
+async def receive_audio_file(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+    document = update.message.document
+
+    if not document:
+        return
+
+    mime = document.mime_type or ""
+
+    if not mime.startswith("audio/"):
+        return
+
+    await context.bot.send_audio(
+        chat_id=update.effective_chat.id,
+        audio=document.file_id,
+        title=document.file_name or "WAVE Track",
+        performer="WAVE",
+        caption="🎧 Слухай прямо в Telegram"
+    )
 
 
 def main():
@@ -131,6 +178,20 @@ def main():
 
     app.add_handler(
         CommandHandler("start", start)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.AUDIO,
+            receive_audio
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.Document.ALL,
+            receive_audio_file
+        )
     )
 
     app.add_handler(
