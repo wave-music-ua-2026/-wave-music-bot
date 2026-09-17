@@ -7,6 +7,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,19 +16,32 @@ from telegram.ext import (
     filters,
 )
 
+
 TOKEN = os.environ["BOT_TOKEN"]
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# /START
+# =========================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
-        "🔎 Напиши назву пісні — я знайду її.\n\n"
+        "🔎 Напиши назву пісні або виконавця — "
+        "я знайду варіанти.\n\n"
         "🎧 Також можеш надіслати свій MP3/M4A — "
         "його можна слухати прямо в Telegram."
     )
 
 
-def find_track(query):
+# =========================
+# ПОШУК 5 РЕЗУЛЬТАТІВ
+# =========================
+
+def find_tracks(query):
     options = {
         "quiet": True,
         "no_warnings": True,
@@ -37,33 +51,53 @@ def find_track(query):
 
     with yt_dlp.YoutubeDL(options) as ydl:
         result = ydl.extract_info(
-            f"ytsearch1:{query}",
+            f"ytsearch5:{query}",
             download=False,
         )
 
-    entries = result.get("entries", [])
+    tracks = []
 
-    if not entries:
-        return None
+    for item in result.get("entries", []):
+        if not item:
+            continue
 
-    track = entries[0]
+        video_id = item.get("id")
 
-    video_id = track.get("id")
+        if not video_id:
+            continue
 
-    if not video_id:
-        return None
+        title = item.get("title") or "Без назви"
 
-    return {
-        "title": track.get("title") or query,
-        "artist": (
-            track.get("channel")
-            or track.get("uploader")
+        artist = (
+            item.get("channel")
+            or item.get("uploader")
             or "Невідомий виконавець"
-        ),
-        "url": f"https://www.youtube.com/watch?v={video_id}",
-        "thumbnail": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg",
-    }
+        )
 
+        youtube_url = (
+            f"https://www.youtube.com/watch?v={video_id}"
+        )
+
+        thumbnail = (
+            f"https://i.ytimg.com/vi/"
+            f"{video_id}/hqdefault.jpg"
+        )
+
+        tracks.append(
+            {
+                "title": title,
+                "artist": artist,
+                "url": youtube_url,
+                "thumbnail": thumbnail,
+            }
+        )
+
+    return tracks
+
+
+# =========================
+# ОБРОБКА ТЕКСТОВОГО ПОШУКУ
+# =========================
 
 async def search_music(
     update: Update,
@@ -75,56 +109,77 @@ async def search_music(
         return
 
     status = await update.message.reply_text(
-        "🔎 Шукаю трек..."
+        "🔎 Шукаю музику..."
     )
 
     try:
-        track = await asyncio.to_thread(
-            find_track,
+        tracks = await asyncio.to_thread(
+            find_tracks,
             query,
         )
 
-        await status.delete()
+        try:
+            await status.delete()
+        except Exception:
+            pass
 
-        if not track:
+        if not tracks:
             await update.message.reply_text(
-                "😕 Нічого не знайшов.\n"
-                "Спробуй написати назву та виконавця."
+                "😕 Нічого не знайшов.\n\n"
+                "Спробуй написати назву пісні "
+                "та виконавця."
             )
             return
 
-        keyboard = InlineKeyboardMarkup(
-            [
+        await update.message.reply_text(
+            f"🎧 Результати для:\n\n"
+            f"🔎 {query}\n\n"
+            f"Знайшов {len(tracks)} варіантів 👇"
+        )
+
+        for number, track in enumerate(
+            tracks,
+            start=1,
+        ):
+            keyboard = InlineKeyboardMarkup(
                 [
-                    InlineKeyboardButton(
-                        "▶️ Відкрити на YouTube",
-                        url=track["url"],
-                    )
+                    [
+                        InlineKeyboardButton(
+                            "▶️ Відкрити на YouTube",
+                            url=track["url"],
+                        )
+                    ]
                 ]
-            ]
-        )
-
-        caption = (
-            f"🎵 {track['title']}\n"
-            f"👤 {track['artist']}\n\n"
-            "▶️ Відкрити оригінал:"
-        )
-
-        try:
-            await update.message.reply_photo(
-                photo=track["thumbnail"],
-                caption=caption,
-                reply_markup=keyboard,
             )
 
-        except Exception:
-            await update.message.reply_text(
-                caption,
-                reply_markup=keyboard,
+            caption = (
+                f"🎵 {number}. {track['title']}\n"
+                f"👤 {track['artist']}"
             )
+
+            try:
+                await update.message.reply_photo(
+                    photo=track["thumbnail"],
+                    caption=caption,
+                    reply_markup=keyboard,
+                )
+
+            except Exception as photo_error:
+                print(
+                    "PHOTO ERROR:",
+                    photo_error,
+                )
+
+                await update.message.reply_text(
+                    caption,
+                    reply_markup=keyboard,
+                )
 
     except Exception as error:
-        print("SEARCH ERROR:", error)
+        print(
+            "SEARCH ERROR:",
+            error,
+        )
 
         try:
             await status.delete()
@@ -132,10 +187,14 @@ async def search_music(
             pass
 
         await update.message.reply_text(
-            "⚠️ Не вдалося знайти трек.\n"
+            "⚠️ Не вдалося виконати пошук.\n\n"
             "Спробуй ще раз трохи пізніше."
         )
 
+
+# =========================
+# MP3 / AUDIO
+# =========================
 
 async def receive_audio(
     update: Update,
@@ -146,13 +205,37 @@ async def receive_audio(
     if not audio:
         return
 
-    await update.message.reply_audio(
-        audio=audio.file_id,
-        title=audio.title or audio.file_name or "WAVE Track",
-        performer=audio.performer or "WAVE",
-        caption="🎧 Слухай прямо в Telegram ▶️",
-    )
+    try:
+        await update.message.reply_audio(
+            audio=audio.file_id,
+            title=(
+                audio.title
+                or audio.file_name
+                or "WAVE Track"
+            ),
+            performer=(
+                audio.performer
+                or "WAVE"
+            ),
+            caption=(
+                "🎧 Слухай прямо в Telegram ▶️"
+            ),
+        )
 
+    except Exception as error:
+        print(
+            "AUDIO ERROR:",
+            error,
+        )
+
+        await update.message.reply_text(
+            "⚠️ Не вдалося обробити аудіо."
+        )
+
+
+# =========================
+# MP3/M4A ЯК DOCUMENT
+# =========================
 
 async def receive_document(
     update: Update,
@@ -163,7 +246,9 @@ async def receive_document(
     if not document:
         return
 
-    filename = (document.file_name or "").lower()
+    filename = (
+        document.file_name or ""
+    ).lower()
 
     allowed = filename.endswith(
         (
@@ -177,19 +262,47 @@ async def receive_document(
 
     if not allowed:
         await update.message.reply_text(
-            "⚠️ Надішли MP3, M4A, AAC, OGG або WAV."
+            "⚠️ Надішли аудіофайл:\n"
+            "MP3, M4A, AAC, OGG або WAV."
         )
         return
 
-    await update.message.reply_audio(
-        audio=document.file_id,
-        title=document.file_name or "WAVE Track",
-        caption="🎧 Слухай прямо в Telegram ▶️",
-    )
+    try:
+        await update.message.reply_audio(
+            audio=document.file_id,
+            title=(
+                document.file_name
+                or "WAVE Track"
+            ),
+            performer="WAVE",
+            caption=(
+                "🎧 Слухай прямо в Telegram ▶️"
+            ),
+        )
 
+    except Exception as error:
+        print(
+            "DOCUMENT ERROR:",
+            error,
+        )
+
+        await update.message.reply_text(
+            "⚠️ Не вдалося відкрити цей файл "
+            "як аудіо."
+        )
+
+
+# =========================
+# ЗАПУСК БОТА
+# =========================
 
 def main():
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application
+        .builder()
+        .token(TOKEN)
+        .build()
+    )
 
     app.add_handler(
         CommandHandler(
@@ -214,7 +327,8 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT
+            & ~filters.COMMAND,
             search_music,
         )
     )
