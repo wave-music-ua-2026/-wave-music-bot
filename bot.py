@@ -1,7 +1,6 @@
 import os
-import asyncio
+from urllib.parse import quote_plus
 
-import yt_dlp
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -17,49 +16,10 @@ TOKEN = os.environ["BOT_TOKEN"]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
-        "🔎 Напиши назву пісні — я знайду її на YouTube.\n\n"
-        "🎧 Або надішли мені свій MP3/M4A — "
+        "🔎 Напиши назву пісні — я допоможу знайти її.\n\n"
+        "🎧 Або надішли MP3/M4A файл — "
         "його можна буде слухати прямо в Telegram."
     )
-
-
-def find_youtube_track(query: str):
-    options = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "extract_flat": True,
-    }
-
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(
-            f"ytsearch1:{query}",
-            download=False
-        )
-
-    entries = info.get("entries") or []
-
-    if not entries:
-        return None
-
-    video = entries[0]
-    video_id = video.get("id")
-
-    if not video_id:
-        return None
-
-    return {
-        "title": video.get("title") or query,
-        "channel": (
-            video.get("channel")
-            or video.get("uploader")
-            or "YouTube"
-        ),
-        "url": f"https://www.youtube.com/watch?v={video_id}",
-        "thumbnail": (
-            f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-        ),
-    }
 
 
 async def search_music(
@@ -71,57 +31,50 @@ async def search_music(
     if not query:
         return
 
-    status = await update.message.reply_text(
-        f"🔎 Шукаю: {query}..."
+    encoded = quote_plus(query)
+
+    youtube = (
+        "https://www.youtube.com/results?"
+        f"search_query={encoded}"
     )
 
-    try:
-        track = await asyncio.to_thread(
-            find_youtube_track,
-            query
-        )
+    spotify = (
+        "https://open.spotify.com/search/"
+        f"{encoded}"
+    )
 
-        if not track:
-            await status.edit_text(
-                "😕 Нічого не знайшов."
+    soundcloud = (
+        "https://soundcloud.com/search?"
+        f"q={encoded}"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "▶️ YouTube",
+                url=youtube
             )
-            return
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "▶️ Відкрити на YouTube",
-                    url=track["url"]
-                )
-            ]
-        ])
-
-        caption = (
-            f"🎵 {track['title']}\n"
-            f"👤 {track['channel']}\n\n"
-            "▶️ Відкрити оригінал:"
-        )
-
-        try:
-            await update.message.reply_photo(
-                photo=track["thumbnail"],
-                caption=caption,
-                reply_markup=keyboard
+        ],
+        [
+            InlineKeyboardButton(
+                "🟢 Spotify",
+                url=spotify
             )
-        except Exception:
-            await update.message.reply_text(
-                caption,
-                reply_markup=keyboard
+        ],
+        [
+            InlineKeyboardButton(
+                "☁️ SoundCloud",
+                url=soundcloud
             )
+        ],
+    ]
 
-        await status.delete()
-
-    except Exception as error:
-        print(f"Search error: {error}")
-
-        await status.edit_text(
-            "⚠️ Помилка пошуку. Спробуй ще раз."
-        )
+    await update.message.reply_text(
+        f"🎧 Знайшов варіанти для:\n\n"
+        f"🔎 {query}\n\n"
+        "Обери сервіс 👇",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
 
 
 async def receive_audio(
@@ -133,24 +86,15 @@ async def receive_audio(
     if not audio:
         return
 
-    title = audio.title or "WAVE Track"
-    performer = audio.performer or "WAVE"
-
-    await update.message.reply_text(
-        "✅ Аудіо отримано.\n"
-        "Зараз надсилаю його через плеєр Telegram 👇"
-    )
-
-    await context.bot.send_audio(
-        chat_id=update.effective_chat.id,
+    await update.message.reply_audio(
         audio=audio.file_id,
-        title=title,
-        performer=performer,
-        caption="🎧 Слухай прямо в Telegram"
+        title=audio.title or audio.file_name or "WAVE Track",
+        performer=audio.performer or "WAVE",
+        caption="🎧 Готово — слухай прямо в Telegram ▶️",
     )
 
 
-async def receive_audio_file(
+async def receive_document(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
@@ -161,15 +105,23 @@ async def receive_audio_file(
 
     mime = document.mime_type or ""
 
-    if not mime.startswith("audio/"):
+    allowed = (
+        mime.startswith("audio/")
+        or (document.file_name or "").lower().endswith(
+            (".mp3", ".m4a", ".aac", ".ogg", ".wav")
+        )
+    )
+
+    if not allowed:
+        await update.message.reply_text(
+            "⚠️ Надішли аудіофайл MP3, M4A, AAC, OGG або WAV."
+        )
         return
 
-    await context.bot.send_audio(
-        chat_id=update.effective_chat.id,
+    await update.message.reply_audio(
         audio=document.file_id,
         title=document.file_name or "WAVE Track",
-        performer="WAVE",
-        caption="🎧 Слухай прямо в Telegram"
+        caption="🎧 Тепер файл можна слухати прямо в Telegram ▶️",
     )
 
 
@@ -190,7 +142,7 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.Document.ALL,
-            receive_audio_file
+            receive_document
         )
     )
 
