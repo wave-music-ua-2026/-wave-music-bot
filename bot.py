@@ -1,8 +1,14 @@
 import os
 import asyncio
+from urllib.parse import quote_plus
+
 import yt_dlp
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -11,18 +17,33 @@ from telegram.ext import (
     filters,
 )
 
+
 TOKEN = os.environ["BOT_TOKEN"]
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# =========================
+# START
+# =========================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     await update.message.reply_text(
         "🎵 WAVE | Твоя музика 🇺🇦\n\n"
-        "🔎 Напиши назву пісні або виконавця — "
-        "я знайду варіанти на YouTube.\n\n"
-        "🎧 Або надішли свій MP3/M4A файл — "
-        "його можна буде слухати прямо в Telegram."
+        "🔎 Напиши назву пісні або виконавця.\n\n"
+        "Наприклад:\n"
+        "The Weeknd Blinding Lights\n"
+        "Океан Ельзи Обійми\n"
+        "музика в авто\n\n"
+        "🎧 Також можеш надіслати свій MP3/M4A — "
+        "його можна слухати прямо в Telegram."
     )
 
+
+# =========================
+# YOUTUBE SEARCH
+# =========================
 
 def youtube_search(query: str):
     options = {
@@ -32,14 +53,85 @@ def youtube_search(query: str):
         "skip_download": True,
     }
 
+    # Беремо більше результатів,
+    # а потім відфільтровуємо зайве
     with yt_dlp.YoutubeDL(options) as ydl:
         data = ydl.extract_info(
-            f"ytsearch5:{query}",
+            f"ytsearch12:{query}",
             download=False,
         )
 
     return data.get("entries", [])
 
+
+# =========================
+# FILTER RESULTS
+# =========================
+
+def is_bad_result(item):
+    title = (item.get("title") or "").lower()
+
+    bad_words = [
+        "1 hour",
+        "1hour",
+        "one hour",
+        "10 hours",
+        "10 hour",
+        "8d audio",
+        "slowed",
+        "slowed + reverb",
+        "slowed and reverb",
+        "nightcore",
+        "sped up",
+        "karaoke",
+        "instrumental",
+        "reaction",
+        "tutorial",
+        "cover",
+    ]
+
+    return any(word in title for word in bad_words)
+
+
+def prepare_results(entries):
+    good = []
+    fallback = []
+
+    seen_ids = set()
+
+    for item in entries:
+        if not item:
+            continue
+
+        video_id = item.get("id")
+
+        if not video_id:
+            continue
+
+        if video_id in seen_ids:
+            continue
+
+        seen_ids.add(video_id)
+
+        if is_bad_result(item):
+            fallback.append(item)
+        else:
+            good.append(item)
+
+    # Спочатку нормальні результати.
+    # Якщо їх мало — додаємо решту.
+    results = good[:5]
+
+    if len(results) < 5:
+        needed = 5 - len(results)
+        results.extend(fallback[:needed])
+
+    return results
+
+
+# =========================
+# MUSIC SEARCH
+# =========================
 
 async def search_music(
     update: Update,
@@ -51,36 +143,60 @@ async def search_music(
         return
 
     loading = await update.message.reply_text(
-        "🔎 Шукаю музику..."
+        "🔎 WAVE шукає музику..."
     )
 
     try:
-        results = await asyncio.to_thread(
+        entries = await asyncio.to_thread(
             youtube_search,
             query,
         )
 
-        await loading.delete()
+        results = prepare_results(entries)
+
+        try:
+            await loading.delete()
+        except Exception:
+            pass
 
         if not results:
             await update.message.reply_text(
-                "😕 Нічого не знайшов."
+                "😕 Нічого не знайшов.\n\n"
+                "Спробуй написати назву пісні "
+                "та виконавця точніше."
             )
             return
 
+        encoded_query = quote_plus(query)
+
+        spotify_url = (
+            "https://open.spotify.com/search/"
+            + encoded_query
+        )
+
+        soundcloud_url = (
+            "https://soundcloud.com/search?"
+            "q="
+            + encoded_query
+        )
+
         await update.message.reply_text(
-            f"🎧 Результати для:\n\n"
+            "🎧 Результати для:\n\n"
             f"🔎 {query}\n\n"
             f"Знайшов {len(results)} варіантів 👇"
         )
 
-        for number, item in enumerate(results, start=1):
+        for number, item in enumerate(
+            results,
+            start=1,
+        ):
             video_id = item.get("id")
 
-            if not video_id:
-                continue
+            title = (
+                item.get("title")
+                or "Без назви"
+            )
 
-            title = item.get("title") or "Без назви"
             artist = (
                 item.get("channel")
                 or item.get("uploader")
@@ -88,22 +204,34 @@ async def search_music(
             )
 
             youtube_url = (
-                f"https://www.youtube.com/watch?v={video_id}"
+                "https://www.youtube.com/watch?v="
+                + video_id
             )
 
             thumbnail = (
-                f"https://i.ytimg.com/vi/"
-                f"{video_id}/hqdefault.jpg"
+                "https://i.ytimg.com/vi/"
+                + video_id
+                + "/hqdefault.jpg"
             )
 
             keyboard = InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton(
-                            "▶️ Відкрити на YouTube",
+                            "▶️ YouTube",
                             url=youtube_url,
                         )
-                    ]
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            "🟢 Spotify",
+                            url=spotify_url,
+                        ),
+                        InlineKeyboardButton(
+                            "☁️ SoundCloud",
+                            url=soundcloud_url,
+                        ),
+                    ],
                 ]
             )
 
@@ -118,25 +246,38 @@ async def search_music(
                     caption=caption,
                     reply_markup=keyboard,
                 )
-            except Exception:
+
+            except Exception as error:
+                print(
+                    "PHOTO ERROR:",
+                    error,
+                )
+
                 await update.message.reply_text(
                     caption,
                     reply_markup=keyboard,
                 )
 
     except Exception as error:
+        print(
+            "SEARCH ERROR:",
+            error,
+        )
+
         try:
             await loading.delete()
         except Exception:
             pass
 
-        print("SEARCH ERROR:", error)
-
         await update.message.reply_text(
-            "⚠️ Не вдалося виконати пошук.\n"
-            "Спробуй ще раз."
+            "⚠️ Не вдалося виконати пошук.\n\n"
+            "Спробуй ще раз через кілька секунд."
         )
 
+
+# =========================
+# USER AUDIO
+# =========================
 
 async def receive_audio(
     update: Update,
@@ -147,11 +288,24 @@ async def receive_audio(
     if message.audio:
         audio = message.audio
 
+        title = (
+            audio.title
+            or audio.file_name
+            or "WAVE Track"
+        )
+
+        performer = (
+            audio.performer
+            or "WAVE"
+        )
+
         await message.reply_audio(
             audio=audio.file_id,
-            title=audio.title or "WAVE Track",
-            performer=audio.performer or "WAVE",
-            caption="🎧 Слухай прямо в Telegram ▶️",
+            title=title,
+            performer=performer,
+            caption=(
+                "🎧 Слухай прямо в Telegram ▶️"
+            ),
         )
 
         return
@@ -161,25 +315,64 @@ async def receive_audio(
     if not document:
         return
 
-    mime = document.mime_type or ""
+    filename = (
+        document.file_name
+        or "WAVE Track"
+    )
+
+    mime = (
+        document.mime_type
+        or ""
+    )
+
+    allowed_extensions = (
+        ".mp3",
+        ".m4a",
+        ".aac",
+        ".ogg",
+        ".wav",
+        ".flac",
+    )
 
     allowed = (
         mime.startswith("audio/")
-        or document.file_name.lower().endswith(
-            (".mp3", ".m4a", ".aac", ".ogg", ".wav")
+        or filename.lower().endswith(
+            allowed_extensions
         )
     )
 
     if not allowed:
+        await message.reply_text(
+            "⚠️ Надішли аудіофайл "
+            "MP3, M4A, AAC, OGG, WAV або FLAC."
+        )
         return
 
-    await message.reply_audio(
-        audio=document.file_id,
-        title=document.file_name or "WAVE Track",
-        performer="WAVE",
-        caption="🎧 Слухай прямо в Telegram ▶️",
-    )
+    try:
+        await message.reply_audio(
+            audio=document.file_id,
+            title=filename,
+            performer="WAVE",
+            caption=(
+                "🎧 Слухай прямо в Telegram ▶️"
+            ),
+        )
 
+    except Exception as error:
+        print(
+            "AUDIO ERROR:",
+            error,
+        )
+
+        await message.reply_text(
+            "⚠️ Telegram не зміг відкрити "
+            "цей файл як аудіо."
+        )
+
+
+# =========================
+# MAIN
+# =========================
 
 def main():
     app = (
@@ -211,7 +404,8 @@ def main():
 
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+            filters.TEXT
+            & ~filters.COMMAND,
             search_music,
         )
     )
